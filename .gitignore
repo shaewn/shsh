@@ -1,0 +1,6 @@
+.cache/
+.git/
+bin/
+shsh
+a.out
+compile_commands.json
