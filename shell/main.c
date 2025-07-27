@@ -1,14 +1,15 @@
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-
-#include <limits.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-#include "mem_arena.h"
 #include "invokers.h"
+#include "mem_arena.h"
 
 typedef int (*invoker_t)(int argc, const char **argv);
 
@@ -65,9 +66,7 @@ void add_builtin(invoker_t invoker, const char *first_name, ...) {
     va_end(more_names);
 }
 
-void init_builtins(void) {
-    add_builtin(invoker_pwd, "pwd", NULL);
-}
+void init_builtins(void) { add_builtin(invoker_pwd, "pwd", NULL); }
 
 #define PROMPT_MAX 128
 #define INPUT_LINE_MAX 4096
@@ -139,6 +138,56 @@ int resolve_and_execute_vector(int argc, char **argv) {
         }
     }
 
+    pid_t child = fork();
+    if (child == -1) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if (child == 0) {
+        setpgid(0, 0); // In our own process group.
+        // TODO: Figure out this foreground process group stuff.
+        // tcsetpgrp(0, getpgid(0)); // Make us the foreground process group.
+        execvp(*argv, argv);
+
+        switch (errno) {
+            case ENOENT: {
+                const char *s = *argv;
+                while (*s && *s != '/') ++s;
+                if (*s == '/') {
+                    printf("shsh: no such file or directory: %s\n", *argv);
+                } else {
+                    printf("shsh: command not found: %s\n", *argv);
+                }
+
+                break;
+            }
+            case EACCES:
+            case EPERM:
+                printf("shsh: permission denied: %s\n", *argv);
+                break;
+            default:
+                perror("shsh: unhandled error:");
+        }
+
+        _exit(1);
+    } else {
+        int status;
+        waitpid(child, &status, 0);
+
+        // tcsetpgrp(0, getpgid(0));
+
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            return -1;
+        }
+
+        if (WIFSIGNALED(status)) {
+            return -1;
+        }
+
+        return 0;
+    }
+
     return -1;
 }
 
@@ -151,13 +200,14 @@ void do_repl(void) {
     while (1) {
         gethostname(*hostname, sizeof(*hostname));
 
-        snprintf(*prompt, sizeof(*prompt), "%s$ ", *hostname);
+        snprintf(*prompt, sizeof(*prompt), "%s$", *hostname);
 
-        write(STDOUT_FILENO, prompt, strlen(*prompt));
+        printf("%s ", *prompt);
 
         ssize_t count = read(STDIN_FILENO, *line, sizeof(*line));
+        (*line)[count] = 0;
 
-        if (count == 0 || **line == 0) {
+        if (**line == 0) {
             break;
         }
 
@@ -170,8 +220,7 @@ void do_repl(void) {
         int result = resolve_and_execute_vector(argc, argv);
 
         if (result != 0) {
-            const char *s = "shsh: error\n";
-            write(STDOUT_FILENO, s, strlen(s));
+            printf("shsh: error\n");
         }
 
         mem_arena_reset_to_mark(&arena, mark);
@@ -181,6 +230,8 @@ void do_repl(void) {
 
 int main(int argc, char **argv) {
     init_mem_arena(&arena);
+
+    setbuf(stdout, NULL);
 
     init_builtins();
 
