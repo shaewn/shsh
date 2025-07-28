@@ -1,14 +1,14 @@
 #include <ctype.h>
-#include <semaphore.h>
-#include <sys/mman.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <semaphore.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -36,6 +36,8 @@ struct cmd_node *first_node;
 
 int ttyfd = -1;
 FILE *shin, *shout;
+
+void tblock(int sig, int blocked);
 
 void add_builtin(invoker_t invoker, const char *first_name, ...) {
     va_list more_names;
@@ -153,8 +155,20 @@ int resolve_and_execute_vector(int argc, char **argv) {
 
     if (child == 0) {
         setpgid(0, 0); // In our own process group.
-        // TODO: Figure out this foreground process group stuff.
-        // tcsetpgrp(0, getpgid(0)); // Make us the foreground process group.
+
+        tblock(SIGTTOU, 1);
+
+        int result = tcsetpgrp(ttyfd, getpgrp());
+        if (result == -1) {
+            fprintf(shout, "Failed to become foreground process group (I am %lld)\n", (long long)getpid());
+            exit(EXIT_FAILURE);
+        }
+
+        tblock(SIGTTOU, 0);
+
+        // Make sure we don't have any lingering messages before we change ourself.
+        fflush(shout);
+
         execvp(*argv, argv);
 
         switch (errno) {
@@ -179,12 +193,22 @@ int resolve_and_execute_vector(int argc, char **argv) {
                 break;
         }
 
+        fflush(shout);
+
         _exit(1);
     } else {
-        int status;
+        int status, result;
         waitpid(child, &status, 0);
 
-        // tcsetpgrp(0, getpgid(0));
+        tblock(SIGTTOU, 1);
+
+        result = tcsetpgrp(ttyfd, getpgrp());
+
+        if (result == -1) {
+            fprintf(shout, "Failed to set ctty fg pgrp to %d\n", getpgrp());
+        }
+
+        tblock(SIGTTOU, 0);
 
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             return -1;
@@ -208,14 +232,20 @@ void do_repl(void) {
     while (1) {
         gethostname(*hostname, sizeof(*hostname));
         fprintf(shout, "%s$ ", *hostname);
+        fflush(shout);
 
+        errno = 0;
         if (!fgets(*line, sizeof(*line), shin)) {
-            fprintf(shout, "fgets: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            if (errno != 0) {
+                fprintf(shout, "fgets: %s\n", strerror(errno));
+                exit(EXIT_FAILURE);
+            } else {
+                break;
+            }
         }
 
-        if (**line == 0) {
-            break;
+        if ((*line)[1] == 0) {
+            continue;
         }
 
         struct mem_arena_mark *mark = mem_arena_create_mark(&arena);
@@ -228,6 +258,7 @@ void do_repl(void) {
 
         if (result != 0) {
             fprintf(shout, "shsh: error\n");
+            fflush(shout);
         }
 
         mem_arena_reset_to_mark(&arena, mark);
@@ -257,6 +288,8 @@ void setup_tty(void) {
     }
 
     ttyfd = dup2(ttyfd, 10);
+    int fl = fcntl(ttyfd, F_GETFL);
+    fcntl(ttyfd, F_SETFL, fl | FD_CLOEXEC);
 
     shin = fdopen(ttyfd, "r");
     shout = fdopen(ttyfd, "w");
@@ -270,63 +303,6 @@ void setup_tty(void) {
 int main(int argc, char **argv) {
     setup_tty();
 
-    sem_t *semaphore = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-
-    sem_init(semaphore, 1, 0);
-
-    pid_t child = fork();
-    if (child == -1) {
-        perror("fork");
-        return EXIT_FAILURE;
-    } else if (child == 0) {
-        int result;
-
-        signal(SIGTTIN, ttxx_handler);
-        signal(SIGTTOU, ttxx_handler);
-        result = setpgid(0, 0);
-        if (result == -1) {
-            fprintf(shout, "setpgid: %s", strerror(errno));
-            return EXIT_FAILURE;
-        }
-
-        fprintf(stderr, "Waiting on the semaphore.\n");
-        sem_wait(semaphore);
-        fprintf(stderr, "Semaphore signaled.\n");
-
-        pid_t pgrp = tcgetpgrp(ttyfd);
-        if (pgrp != getpid()) {
-            fprintf(stderr, "controlling terminal foreground group (%lld) doesn't match expected (%lld)\n", (long long)pgrp, (long long)child);
-        } else {
-            fprintf(stderr, "WORKING??\n");
-        }
-
-        fprintf(stderr, "%d (me) vs %d\n", getpid(), tcgetpgrp(ttyfd));
-        fprintf(shout, "Test!\n");
-        fflush(shout);
-    } else {
-        int result;
-        fprintf(stderr, "%d (me) vs %d\n", getpid(), tcgetpgrp(ttyfd));
-        result = tcsetpgrp(ttyfd, child);
-        if (result == -1) {
-            fprintf(stderr, "tcsetpgrp: %s", strerror(errno));
-            return EXIT_FAILURE;
-        }
-
-        fprintf(stderr, "Signaling semaphore.\n");
-        sem_post(semaphore);
-
-        int status;
-        waitpid(child, &status, 0);
-
-        if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
-        }
-
-        return EXIT_FAILURE;
-    }
-
-    sem_destroy(semaphore);
-
     init_mem_arena(&arena);
 
     setbuf(stdout, NULL);
@@ -336,4 +312,11 @@ int main(int argc, char **argv) {
     do_repl();
 
     deinit_mem_arena(&arena);
+}
+
+void tblock(int sig, int blocked) {
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    sigprocmask(blocked ? SIG_BLOCK : SIG_UNBLOCK, &mask, NULL);
 }
