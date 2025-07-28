@@ -37,6 +37,8 @@ struct cmd_node *first_node;
 int ttyfd = -1;
 FILE *shin, *shout;
 
+pid_t fg_pgrp;
+
 void tblock(int sig, int blocked);
 
 void add_builtin(invoker_t invoker, const char *first_name, ...) {
@@ -134,6 +136,15 @@ void build_argument_vector(const char *command_line, int *argc, char ***argv) {
     *argc = count - 1;
 }
 
+void fg_pgrp_sig_handler(int sig) {
+    if (fg_pgrp != 0) {
+        kill(-fg_pgrp, sig);
+    }
+
+    fprintf(shout, "Received signal: %s\n", strsignal(sig));
+    fflush(shout);
+}
+
 int resolve_and_execute_vector(int argc, char **argv) {
     if (!*argv) {
         return -1;
@@ -152,6 +163,8 @@ int resolve_and_execute_vector(int argc, char **argv) {
         perror("fork");
         exit(EXIT_FAILURE);
     }
+
+    fg_pgrp = child;
 
     if (child == 0) {
         setpgid(0, 0); // In our own process group.
@@ -198,7 +211,7 @@ int resolve_and_execute_vector(int argc, char **argv) {
         _exit(1);
     } else {
         int status, result;
-        waitpid(child, &status, 0);
+        waitpid(child, &status, WUNTRACED);
 
         tblock(SIGTTOU, 1);
 
@@ -206,6 +219,7 @@ int resolve_and_execute_vector(int argc, char **argv) {
 
         if (result == -1) {
             fprintf(shout, "Failed to set ctty fg pgrp to %d\n", getpgrp());
+            exit(EXIT_FAILURE);
         }
 
         tblock(SIGTTOU, 0);
@@ -214,7 +228,33 @@ int resolve_and_execute_vector(int argc, char **argv) {
             return -1;
         }
 
+        if (WIFSTOPPED(status)) {
+            fprintf(shout, "%lld stopped (%s)\n", (long long)child, strsignal(WSTOPSIG(status)));
+            fflush(shout);
+            return -1;
+        }
+
         if (WIFSIGNALED(status)) {
+            const char *s = NULL;
+
+            switch (WTERMSIG(status)) {
+                case SIGKILL: {
+                    s = "killed";
+                    break;
+                }
+                case SIGTERM: {
+                    s = "terminated";
+                    break;
+                }
+
+                default: break;
+            }
+
+            if (s) {
+                fprintf(shout, "%lld %s\n", (long long)child, s);
+                fflush(shout);
+            }
+
             return -1;
         }
 
@@ -237,6 +277,14 @@ void do_repl(void) {
         errno = 0;
         if (!fgets(*line, sizeof(*line), shin)) {
             if (errno != 0) {
+                switch (errno) {
+                    case EINTR: {
+                        continue;
+                    }
+                    
+                    default: break;
+                }
+
                 fprintf(shout, "fgets: %s\n", strerror(errno));
                 exit(EXIT_FAILURE);
             } else {
@@ -300,8 +348,28 @@ void setup_tty(void) {
     setvbuf(shout, shout_buf, _IOFBF, sizeof(shout_buf));
 }
 
+void setup_signals(void) {
+    struct sigaction act;
+
+    act.sa_flags = 0;
+    act.sa_handler = fg_pgrp_sig_handler;
+
+    int result = sigaction(SIGINT, &act, NULL);
+    if (result == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+
+    sigaction(SIGTSTP, &act, NULL);
+    if (result == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+}
+
 int main(int argc, char **argv) {
     setup_tty();
+    setup_signals();
 
     init_mem_arena(&arena);
 
