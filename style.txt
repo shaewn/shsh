@@ -1,0 +1,7 @@
+1) All types shall fall in one of three categories:
+  a) keyword (e.g., int, unsigned, etc.)
+  b) snake_case, ending with '_t' (e.g., uint64_t)
+  c) PascalCase (e.g., CommandParser)
+2) All variable names shall be snake_case.
+3) All function names shall be snake_case.
+4) All pointers go directly next to the variable names.

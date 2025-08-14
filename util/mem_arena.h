@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct mem_arena_region {
+typedef struct mem_arena_region {
     struct mem_arena_region *next;
     size_t data_offset; // Offset into data_ptr
     size_t region_size;
@@ -18,31 +18,32 @@ struct mem_arena_region {
     // The bytes are close after the end of this structure,
     // but not necessarily contiguous (alignment).
     char *data_ptr;
-};
+} MemArenaRegion;
 
 struct mem_arena_mark_data {
     struct mem_arena_mark_data *next;
     size_t data_offset;
 };
 
-struct mem_arena_mark {
+typedef struct mem_arena_mark {
     struct mem_arena_region *first_region;
     struct mem_arena_mark_data *data_first;
-};
+} MemArenaMark;
 
-typedef void *(*mem_arena_mem_req_t)(void *user, size_t bytes);
-typedef void (*mem_arena_mem_rel_t)(void *user, void *base, size_t bytes);
+/* Must set the 'size' field of the region returned. */
+typedef MemArenaRegion *(*MemArena_RegionProvider)(void *user, size_t bytes);
+typedef void (*MemArena_RegionConsumer)(void *user, MemArenaRegion *region);
 
-struct mem_arena {
+typedef struct mem_arena {
     void *user;
     size_t alignment, region_granularity;
     struct mem_arena_region *first_region;
 
     /* this allocator must return pointers aligned
        to at least `alignment' */
-    mem_arena_mem_req_t mem_req;
-    mem_arena_mem_rel_t mem_rel;
-};
+    MemArena_RegionProvider mem_req;
+    MemArena_RegionConsumer mem_rel;
+} MemArena;
 
 void init_mem_arena(struct mem_arena *ma);
 
@@ -57,7 +58,7 @@ void init_mem_arena(struct mem_arena *ma);
    @param region_granularity: the minimum arena size, and the value up to which region sizes will be
    rounded */
 void init_mem_arena_explicit(struct mem_arena *ma, void *user, size_t alignment,
-                             size_t region_granularity, mem_arena_mem_req_t req, mem_arena_mem_rel_t rel);
+                             size_t region_granularity, MemArena_RegionProvider req, MemArena_RegionConsumer rel);
 
 void deinit_mem_arena(struct mem_arena *ma);
 
