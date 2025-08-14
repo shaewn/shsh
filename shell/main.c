@@ -150,6 +150,7 @@ int resolve_and_execute_vector(int argc, char **argv) {
         return -1;
     }
 
+    // TODO: Could probably use a hash table here.
     for (struct cmd_node *n = first_node; n; n = n->next) {
         for (int i = 0; i < n->name_count; i++) {
             if (strcmp(n->names[i], *argv) == 0) {
@@ -265,6 +266,7 @@ int resolve_and_execute_vector(int argc, char **argv) {
 }
 
 void do_repl(void) {
+    // TODO: To be posix compliant (which we're not even close to anyway), the line would need to allow 'unlimited' text.
     char (*hostname)[HOST_NAME_MAX + 1], (*line)[INPUT_LINE_MAX];
 
     hostname = ALLOC(sizeof(*hostname));
@@ -346,6 +348,9 @@ void setup_tty(void) {
 
     setvbuf(shin, shin_buf, _IOFBF, sizeof(shin_buf));
     setvbuf(shout, shout_buf, _IOFBF, sizeof(shout_buf));
+
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
 }
 
 void setup_signals(void) {
@@ -372,8 +377,6 @@ int main(int argc, char **argv) {
     setup_signals();
 
     init_mem_arena(&arena);
-
-    setbuf(stdout, NULL);
 
     init_builtins();
 

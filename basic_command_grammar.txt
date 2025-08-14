@@ -1,0 +1,16 @@
+(* the following grammar is provided in EBNF *)
+(* this grammar is not posix compliant yet. *)
+
+full_command = list, [ list_sep ] ;
+
+list = and_or, { list_sep, and_or } ;
+list_sep = '&' | ';' ;
+
+and_or = pipeline, { ( "&&" | "||" ), { newline }, pipeline } ;
+
+pipeline = [ '!' ], pipe_sequence ;
+pipe_sequence = command, { '|', { newline }, command } ;
+
+command = simple_command | compound_command, [ redirect_list ] ;
+
+newline = ? newline character, ASCII 10 ?
